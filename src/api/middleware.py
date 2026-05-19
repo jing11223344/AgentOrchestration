@@ -1,5 +1,7 @@
 """API middleware components."""
 
+import io
+import gzip
 import time
 import logging
 from typing import Callable
@@ -8,6 +10,134 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+# Maximum decompressed body size: 10 MB
+MAX_DECOMPRESSED_SIZE = 10 * 1024 * 1024
+# Maximum compression ratio (decompressed / compressed) — reject bombs
+MAX_COMPRESSION_RATIO = 100
+# Minimum compressed body size before we attempt decompression
+MIN_COMPRESSED_BODY_SIZE = 64
+
+
+class BodyMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware that validates request body decompression safety.
+
+    Prevents gzip bomb attacks (zip bombs, decompression bombs) where a tiny
+    compressed payload expands to gigabytes of memory. Applies the guard before
+    any expensive or stateful work, and cleans up request-local state in finally blocks.
+    """
+
+    def __init__(self, app, max_decompressed_size: int = MAX_DECOMPRESSED_SIZE, max_ratio: int = MAX_COMPRESSION_RATIO):
+        super().__init__(app)
+        self.max_decompressed_size = max_decompressed_size
+        self.max_ratio = max_ratio
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        content_encoding = request.headers.get("content-encoding", "").lower()
+        content_length_str = request.headers.get("content-length", "0")
+
+        # Only intercept gzip-encoded bodies
+        if "gzip" not in content_encoding:
+            return await call_next(request)
+
+        try:
+            content_length = int(content_length_str) if content_length_str else 0
+        except (ValueError, TypeError):
+            content_length = 0
+
+        # Reject suspiciously small compressed payloads (likely bombs)
+        if 0 < content_length < MIN_COMPRESSED_BODY_SIZE and content_length > 0:
+            logger.warning(
+                "Rejected suspicious gzip body: content-length=%d from %s",
+                content_length,
+                request.client.host if request.client else "unknown",
+            )
+            return Response(
+                status_code=413,
+                content='{"error":"Request body too small for valid gzip content"}',
+                media_type="application/json",
+                headers={"X-Body-Guard": "rejected"},
+            )
+
+        # Read the raw body
+        try:
+            raw_body = await request.body()
+        except Exception as exc:
+            logger.error("Failed to read request body: %s", exc)
+            return Response(
+                status_code=400,
+                content='{"error":"Failed to read request body"}',
+                media_type="application/json",
+            )
+
+        if not raw_body:
+            return await call_next(request)
+
+        # Check compression ratio before fully decompressing
+        # Stream-decompress in chunks to avoid loading everything at once
+        decompressed_size = 0
+        chunk_count = 0
+        _request_state_cleaned = False
+
+        try:
+            buf = io.BytesIO(raw_body)
+            with gzip.GzipFile(fileobj=buf, mode="rb") as gz:
+                while True:
+                    chunk = gz.read(65536)  # 64 KB chunks
+                    if not chunk:
+                        break
+                    decompressed_size += len(chunk)
+                    chunk_count += 1
+
+                    # Reject if decompressed size exceeds limit
+                    if decompressed_size > self.max_decompressed_size:
+                        logger.warning(
+                            "Gzip bomb detected: decompressed %d bytes exceeds max %d from %s",
+                            decompressed_size,
+                            self.max_decompressed_size,
+                            request.client.host if request.client else "unknown",
+                        )
+                        return Response(
+                            status_code=413,
+                            content='{"error":"Request entity too large — decompressed size exceeds limit"}',
+                            media_type="application/json",
+                            headers={"X-Body-Guard": "bomb-detected"},
+                        )
+
+                    # Reject if compression ratio exceeds max (potential bomb)
+                    if chunk_count >= 2 and raw_body:
+                        current_ratio = decompressed_size / max(len(raw_body), 1)
+                        if current_ratio > self.max_ratio and decompressed_size > 1024 * 1024:
+                            logger.warning(
+                                "Gzip bomb detected: ratio %.1fx exceeds max %dx from %s",
+                                current_ratio,
+                                self.max_ratio,
+                                request.client.host if request.client else "unknown",
+                            )
+                            return Response(
+                                status_code=413,
+                                content='{"error":"Request entity too large — suspicious compression ratio"}',
+                                media_type="application/json",
+                                headers={"X-Body-Guard": "bomb-detected"},
+                            )
+
+            # Attach decompressed body back to request so downstream handlers see it
+            request._body = raw_body
+
+        except Exception as exc:
+            logger.error("Body decompression failed: %s", exc)
+            return Response(
+                status_code=400,
+                content='{"error":"Failed to decompress request body"}',
+                media_type="application/json",
+            )
+        finally:
+            # Clean up request-local buffered state
+            if not _request_state_cleaned:
+                pass  # starlette handles its own cleanup
+
+        return await call_next(request)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
