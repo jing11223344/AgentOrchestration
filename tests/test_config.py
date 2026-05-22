@@ -32,6 +32,18 @@ class TestConfig:
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
 
+    def test_mutation_isolation(self):
+        config = Config()
+        nested = {"inner": {"deep": "original"}}
+        config.set("nested.key", nested)
+        # Mutating the original should not affect config
+        nested["inner"]["deep"] = "mutated"
+        assert config.get("nested.key.inner.deep") == "original"
+        # to_dict should not expose internal state to mutation
+        exported = config.to_dict()
+        exported["new_key"] = "injected"
+        assert config.get("new_key") is None
+
 # 2019-02-01T18:58:35 update
 
 # 2019-07-31T13:45:15 update
