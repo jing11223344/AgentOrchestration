@@ -2,7 +2,7 @@
 
 import time
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Union
 from threading import Lock
 
 
@@ -19,8 +19,10 @@ class MetricsCollector:
             self._counters[metric] += value
 
     def gauge(self, metric: str, value: float) -> None:
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"Gauge value must be numeric, got {type(value).__name__}")
         with self._lock:
-            self._gauges[metric] = value
+            self._gauges[metric] = float(value)
 
     def observe(self, metric: str, value: float) -> None:
         with self._lock:
