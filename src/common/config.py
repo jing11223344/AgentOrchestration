@@ -2,19 +2,35 @@
 
 import os
 import json
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 
 class Config:
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, data: Optional[Dict] = None):
         self._data: Dict[str, Any] = {}
         if config_path:
             self.load(config_path)
+        if data is not None:
+            self._data = deepcopy(data)
         self._load_env_overrides()
 
     def load(self, path: str) -> None:
         with open(path) as f:
             self._data = json.load(f)
+
+    def update(self, data: Dict) -> None:
+        """Update config with a dict, deep-copying to prevent external mutation."""
+        merged = deepcopy(self._data)
+        self._deep_merge(merged, deepcopy(data))
+        self._data = merged
+
+    def _deep_merge(self, base: Dict, override: Dict) -> None:
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                self._deep_merge(base[key], value)
+            else:
+                base[key] = value
 
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
@@ -30,7 +46,7 @@ class Config:
             if part not in current:
                 current[part] = {}
             current = current[part]
-        current[parts[-1]] = value
+        current[parts[-1]] = deepcopy(value) if isinstance(value, dict) else value
 
     def get(self, key: str, default: Any = None) -> Any:
         parts = key.split(".")
@@ -48,7 +64,7 @@ class Config:
         self._set_nested(key, value)
 
     def to_dict(self) -> Dict:
-        return self._data
+        return deepcopy(self._data)
 
 # 2019-03-14T15:29:32 update
 
