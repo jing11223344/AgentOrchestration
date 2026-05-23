@@ -1,3 +1,5 @@
+"""Tests for configuration management."""
+
 import pytest
 from src.common.config import Config
 
@@ -31,6 +33,56 @@ class TestConfig:
         data = config.to_dict()
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
+
+    def test_dict_init_deep_copy(self):
+        """Config(data=...) must deep-copy so external mutations don't leak in."""
+        original = {"db": {"host": "prod-db"}}
+        config = Config(data=original)
+        original["db"]["host"] = "evil-db"
+        assert config.get("db.host") == "prod-db", (
+            "External mutation after init must not affect Config"
+        )
+
+    def test_to_dict_deep_copy(self):
+        """to_dict() must return a copy so callers cannot mutate internal state."""
+        config = Config(data={"key": "value", "nested": {"inner": "data"}})
+        exported = config.to_dict()
+        exported["nested"]["inner"] = "tampered"
+        assert config.get("nested.inner") == "data", (
+            "Mutation of returned dict must not affect Config"
+        )
+
+    def test_update_deep_copy(self):
+        """update() must deep-copy so subsequent external mutation is safe."""
+        config = Config(data={"app": {"name": "myapp", "port": 8080}})
+        update_data = {"app": {"debug": True}}
+        config.update(update_data)
+        update_data["app"]["debug"] = False
+        assert config.get("app.debug") is True, (
+            "External mutation after update must not affect Config"
+        )
+
+    def test_update_merges_nested(self):
+        """update() must deep-merge nested dicts, not replace them."""
+        config = Config(data={"app": {"name": "myapp", "port": 8080}})
+        config.update({"app": {"debug": True}})
+        assert config.get("app.name") == "myapp"
+        assert config.get("app.port") == 8080
+        assert config.get("app.debug") is True
+
+    def test_set_deep_copy_nested_dict(self):
+        """set() with a dict value must deep-copy it."""
+        config = Config()
+        nested = {"inner": "original"}
+        config.set("feature.config", nested)
+        nested["inner"] = "tampered"
+        assert config.get("feature.config.inner") == "original"
+
+    def test_set_deep_copy_flat_value(self):
+        """set() with a flat value must not deep-copy unnecessarily (scalars are immutable)."""
+        config = Config()
+        config.set("timeout", 30)
+        assert config.get("timeout") == 30
 
 # 2019-02-01T18:58:35 update
 
